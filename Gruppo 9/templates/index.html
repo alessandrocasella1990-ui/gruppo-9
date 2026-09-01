@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hand Landmarker realtime</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">MediaPipe Tasks Vision</p>
+        <h1>Misura pollice–indice</h1>
+        <p class="subtitle">Webcam condivisa, landmark in realtime e serie temporale locale.</p>
+      </header>
+
+      <section class="layout">
+        <div class="video-card">
+          <img src="{{ url_for('video_feed') }}" alt="Video webcam con landmark della mano">
+        </div>
+
+        <aside class="side-panel">
+          <section class="metric-card">
+            <span id="detection-badge" class="badge waiting">In attesa</span>
+            <p class="metric-label">Distanza normalizzata</p>
+            <p id="distance" class="metric-value">—</p>
+            <p class="metric-note">Distanza 4–8 ÷ distanza 0–9</p>
+            <dl>
+              <div>
+                <dt>Campioni nel buffer</dt>
+                <dd id="sample-count">0</dd>
+              </div>
+              <div>
+                <dt>Ultimo aggiornamento</dt>
+                <dd id="timestamp">—</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="chart-card">
+            <div class="chart-heading">
+              <div>
+                <p class="chart-eyebrow">Serie temporale</p>
+                <h2>Andamento del segnale</h2>
+              </div>
+              <span class="live-dot" aria-label="Aggiornamento in tempo reale"></span>
+            </div>
+            <canvas id="signal-chart" aria-label="Grafico della distanza normalizzata nel tempo"></canvas>
+            <div class="chart-scale">
+              <span id="chart-min">—</span>
+              <span>ultimi campioni</span>
+              <span id="chart-max">—</span>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script>
+      const distanceElement = document.querySelector("#distance");
+      const timestampElement = document.querySelector("#timestamp");
+      const badgeElement = document.querySelector("#detection-badge");
+      const countElement = document.querySelector("#sample-count");
+      const chartCanvas = document.querySelector("#signal-chart");
+      const chartMinElement = document.querySelector("#chart-min");
+      const chartMaxElement = document.querySelector("#chart-max");
+
+      async function refreshLatest() {
+        try {
+          const response = await fetch("{{ url_for('api_latest') }}", { cache: "no-store" });
+          const sample = await response.json();
+
+          if (sample.hand_detected) {
+            distanceElement.textContent = sample.distance_normalized.toFixed(3);
+            badgeElement.textContent = "Mano rilevata";
+            badgeElement.className = "badge detected";
+          } else {
+            distanceElement.textContent = "—";
+            badgeElement.textContent = "Mano non rilevata";
+            badgeElement.className = "badge waiting";
+          }
+
+          timestampElement.textContent = sample.timestamp_ms
+            ? new Date(sample.timestamp_ms).toLocaleTimeString("it-IT")
+            : "—";
+        } catch (error) {
+          badgeElement.textContent = "Server non disponibile";
+          badgeElement.className = "badge error";
+        }
+      }
+
+      function drawSignal(samples) {
+        const context = chartCanvas.getContext("2d");
+        const bounds = chartCanvas.getBoundingClientRect();
+        const pixelRatio = window.devicePixelRatio || 1;
+        const width = Math.max(bounds.width, 1);
+        const height = Math.max(bounds.height, 1);
+
+        chartCanvas.width = Math.round(width * pixelRatio);
+        chartCanvas.height = Math.round(height * pixelRatio);
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        context.clearRect(0, 0, width, height);
+
+        const visibleSamples = samples.slice(-300);
+        const values = visibleSamples
+          .map((sample) => sample.distance_normalized)
+          .filter((value) => value !== null);
+
+        if (values.length < 2) {
+          context.fillStyle = "#77838e";
+          context.font = "13px Inter, sans-serif";
+          context.textAlign = "center";
+          context.fillText("In attesa del segnale…", width / 2, height / 2);
+          chartMinElement.textContent = "—";
+          chartMaxElement.textContent = "—";
+          return;
+        }
+
+        let minimum = Math.min(...values);
+        let maximum = Math.max(...values);
+        const spread = maximum - minimum || Math.max(maximum * 0.1, 0.05);
+        minimum -= spread * 0.12;
+        maximum += spread * 0.12;
+
+        const padding = { top: 12, right: 8, bottom: 10, left: 8 };
+        const plotWidth = width - padding.left - padding.right;
+        const plotHeight = height - padding.top - padding.bottom;
+
+        context.strokeStyle = "rgba(130, 150, 165, 0.14)";
+        context.lineWidth = 1;
+        for (let line = 0; line <= 3; line += 1) {
+          const y = padding.top + (plotHeight * line) / 3;
+          context.beginPath();
+          context.moveTo(padding.left, y);
+          context.lineTo(width - padding.right, y);
+          context.stroke();
+        }
+
+        context.strokeStyle = "#65e6aa";
+        context.lineWidth = 2.25;
+        context.lineJoin = "round";
+        context.lineCap = "round";
+        context.beginPath();
+        let penDown = false;
+
+        visibleSamples.forEach((sample, index) => {
+          const value = sample.distance_normalized;
+          if (value === null) {
+            penDown = false;
+            return;
+          }
+
+          const x = padding.left + (plotWidth * index) / Math.max(visibleSamples.length - 1, 1);
+          const y = padding.top + plotHeight * (1 - (value - minimum) / (maximum - minimum));
+          if (penDown) {
+            context.lineTo(x, y);
+          } else {
+            context.moveTo(x, y);
+            penDown = true;
+          }
+        });
+        context.stroke();
+
+        chartMinElement.textContent = Math.min(...values).toFixed(2);
+        chartMaxElement.textContent = Math.max(...values).toFixed(2);
+      }
+
+      async function refreshSeries() {
+        try {
+          const response = await fetch("{{ url_for('api_series') }}", { cache: "no-store" });
+          const series = await response.json();
+          countElement.textContent = series.count;
+          drawSignal(series.samples);
+        } catch (error) {
+          countElement.textContent = "—";
+        }
+      }
+
+      refreshLatest();
+      refreshSeries();
+      window.setInterval(refreshLatest, 200);
+      window.setInterval(refreshSeries, 1000);
+      window.addEventListener("resize", refreshSeries);
+    </script>
+  </body>
+</html>
